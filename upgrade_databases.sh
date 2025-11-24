@@ -2,8 +2,9 @@
 #
 # Author: Brian Joyner Wulbern <brian.wulbern@liferay.com>
 # Platform: Linux/Unix
-# VERSION: 1.16.0
-# Added support for OTIS and OPAP
+# VERSION: 1.17.0
+# Added ALTER TABLES logic directly in to PostrgreSQL for Church Mutual and Sapphire
+# Added properties to portal-upgrade-ext.properties instead of deprecated portal-upgrade-database.properties
 # 
 
 export_mysql_dump() {
@@ -363,12 +364,19 @@ import_postgresql() {
   echo "6. Otis --> 2025Q1_lportal-postgresql-2025.q1.14-08182025.sql"
   echo "7. Other"
   read -p "Enter your choice: " import_choice
+  
+  # Initialize dump_file and alteration_sql variables
+  dump_file=""
+  alteration_sql=""
+
   case $import_choice in
     1)
       dump_file="24Q3_OVAM_database_dump.sql"
       ;;
     2)
       dump_file="24Q3_ChurchMutual_database_dump.sql"
+      # SQL to run after successful import for choice 2
+      alteration_sql="ALTER TABLE public.cpdefinition_x_20102 ALTER COLUMN cpdefinitionid SET NOT NULL;"
       ;;
     3)
       dump_file="24Q4_Jessa_database_dump.sql"
@@ -378,6 +386,8 @@ import_postgresql() {
       ;;
     5)
       dump_file="25Q1_sapphire-postgres-20250415.sql"
+      # SQL to run after successful import for choice 5
+      alteration_sql="ALTER TABLE public.cpdefinition_x_20097 ALTER COLUMN cpdefinitionid SET NOT NULL;"
       ;;
     6)
       dump_file="2025Q1_lportal-postgresql-2025.q1.14-08182025.sql"
@@ -392,16 +402,35 @@ import_postgresql() {
   esac
 
   if [ -f "$dump_file" ]; then
-    echo "Importing PostgreSQL database from $dump_file..."
+    echo "Importing PostgreSQL database from **$dump_file**..."
+    # Import the database dump file
     docker exec -i postgresql_db psql -q -U root -d lportal < "$dump_file"
+    
     if [ $? -eq 0 ]; then
-      echo "Database imported successfully!"
+      echo "Database imported successfully! 🎉"
+      
+      # Check if an alteration is required
+      if [ -n "$alteration_sql" ]; then
+        echo "Running post-import table alteration..."
+        # Execute the ALTER TABLE command using docker exec
+        # The -c flag allows psql to execute a single command (the SQL string)
+        docker exec postgresql_db psql -U root -d lportal -c "$alteration_sql"
+        
+        if [ $? -eq 0 ]; then
+          echo "Table alteration completed successfully! ✅"
+        else
+          echo "Error: Table alteration failed!"
+          # Decide if you want to exit here or just continue
+          # For robustness, we'll just report the error and continue
+        fi
+      fi
+      
     else
-      echo "Error: Database import failed!"
+      echo "Error: Database import failed! ❌"
       exit 1
     fi
   else
-    echo "Error: Dump file $dump_file not found!"
+    echo "Error: Dump file **$dump_file** not found! ⚠️"
     exit 1
   fi
 }
@@ -689,10 +718,10 @@ EOF
 
   DB_UPGRADE_DIR="$LIFERAY_DIR/tools/portal-tools-db-upgrade-client"
   if [[ -d "$DB_UPGRADE_DIR" ]]; then
-    echo "Navigating to $DB_UPGRADE_DIR and updating portal-upgrade-database.properties..."
+    echo "Navigating to $DB_UPGRADE_DIR and updating portal-upgrade-ext.properties..."
     cd "$DB_UPGRADE_DIR" || { echo "Failed to enter $DB_UPGRADE_DIR"; return 1; }
 
-    cat > portal-upgrade-database.properties <<EOF
+    cat > portal-upgrade-ext.properties <<EOF
 jdbc.default.driverClassName=org.postgresql.Driver
 jdbc.default.url=jdbc:postgresql://localhost:5433/lportal
 jdbc.default.username=root
@@ -702,7 +731,7 @@ upgrade.database.preupgrade.verify.enabled=true
 upgrade.database.preupgrade.data.cleanup.enabled=true
 EOF
 
-    echo "portal-upgrade-database.properties updated successfully."
+    echo "portal-upgrade-ext.properties updated successfully."
 
     echo "Running database upgrade script..."
     ./db_upgrade_client.sh -j "-Dfile.encoding=UTF-8 -Duser.timezone=GMT -Xmx4096m"
@@ -858,10 +887,10 @@ EOF
 
   DB_UPGRADE_DIR="$LIFERAY_DIR/tools/portal-tools-db-upgrade-client"
   if [[ -d "$DB_UPGRADE_DIR" ]]; then
-    echo "Navigating to $DB_UPGRADE_DIR and updating portal-upgrade-database.properties..."
+    echo "Navigating to $DB_UPGRADE_DIR and updating portal-upgrade-ext.properties..."
     cd "$DB_UPGRADE_DIR" || { echo "Failed to enter $DB_UPGRADE_DIR"; return 1; }
 
-    cat > portal-upgrade-database.properties <<EOF
+    cat > portal-upgrade-ext.properties <<EOF
 jdbc.default.driverClassName=com.microsoft.sqlserver.jdbc.SQLServerDriver
 jdbc.default.url=jdbc:sqlserver://localhost:1433;databaseName=lportal;trustServerCertificate=true;
 jdbc.default.username=sa
@@ -871,7 +900,7 @@ upgrade.database.preupgrade.verify.enabled=true
 upgrade.database.preupgrade.data.cleanup.enabled=true
 EOF
 
-    echo "portal-upgrade-database.properties updated successfully."
+    echo "portal-upgrade-ext.properties updated successfully."
 
     echo "Running database upgrade script..."
     ./db_upgrade_client.sh -j "-Dfile.encoding=UTF-8 -Duser.timezone=GMT -Xmx4096m"
@@ -907,6 +936,7 @@ setup_and_import_mysql() {
   echo '9) e5a2'  
   echo '10) Other (custom path)'
   echo '11) Liferay DXP Cloud'
+  echo '12) d4a3'
   read -rp 'Enter your choice: ' CHOICE
 
   case "$CHOICE" in
@@ -933,6 +963,7 @@ setup_and_import_mysql() {
       DOCKER_IMAGE="liferay/database-upgrades:$LPD_TICKET"
       IS_DXP_CLOUD=true
       ;;
+    12) TARGET_DB="lportal"; ZIP_FILE="dump-d4a3.sql" ;;
     *)
       echo "Invalid MySQL choice." >&2
       return 1
@@ -1445,7 +1476,7 @@ jdbc.default.url=jdbc:mysql://localhost:3306/$TARGET_DB?useUnicode=true&characte
 jdbc.default.username=root
 jdbc.default.password=
 upgrade.database.dl.storage.check.disabled=true
-#upgrade.database.preupgrade.verify.enabled=true
+upgrade.database.preupgrade.verify.enabled=true
 upgrade.database.preupgrade.data.cleanup.enabled=true
 EOF
   if [[ "$IS_DXP_CLOUD" == "true" ]]; then
@@ -1475,8 +1506,8 @@ EOF
   # Check for database upgrade tool
   local upgrade_tool_dir="$LIFERAY_DIR/tools/portal-tools-db-upgrade-client"
   if [[ -d "$upgrade_tool_dir" ]]; then
-    echo "Creating portal-upgrade-database.properties..."
-    local upgrade_properties_file="$upgrade_tool_dir/portal-upgrade-database.properties"
+    echo "Creating portal-upgrade-ext.properties..."
+    local upgrade_properties_file="$upgrade_tool_dir/portal-upgrade-ext.properties"
     cat > "$upgrade_properties_file" <<EOF || { echo "Error: Failed to create '$upgrade_properties_file'." >&2; return 2; }
 jdbc.default.driverClassName=com.mysql.cj.jdbc.Driver
 jdbc.default.url=jdbc:mysql://localhost:3306/${TARGET_DB}?${characterEncoding=UTF-8}&dontTrackOpenResources=true&holdResultsOpenOverStatementClose=true&${serverTimezone=GMT}&useFastDateParsing=${false}&useUnicode=${true}
@@ -1484,7 +1515,7 @@ jdbc.default.username=root
 jdbc.default.password=
 #liferay.home=${LIFERAY_DIR}
 upgrade.database.dl.storage.check.disabled=true
-#upgrade.database.preupgrade.verify.enabled=true
+upgrade.database.preupgrade.verify.enabled=true
 upgrade.database.preupgrade.data.cleanup.enabled=true
 EOF
       # Enable multi-tenancy upgrade
@@ -1619,7 +1650,7 @@ EOF
     fi
   
     chmod 644 "$upgrade_properties_file" || { echo "Error: Failed to set permissions on '$upgrade_properties_file'." >&2; return 644; }
-    echo "Successfully updated portal-upgrade-database.properties."
+    echo "Successfully updated portal-upgrade-ext.properties."
 
     if [[ -f "$upgrade_tool_dir/db_upgrade_client.sh" ]]; then
       echo "Running database upgrade script for all partitions..."
@@ -1631,7 +1662,7 @@ EOF
         for partition in "${partitions[@]}"; do
           echo "Upgrading partition: $partition"
           # Create temporary properties file for this partition
-          local temp_properties_file="$upgrade_tool_dir/portal-upgrade-database-$partition.properties"
+          local temp_properties_file="$upgrade_tool_dir/portal-upgrade-ext-$partition.properties"
           cat > "$temp_properties_file" <<EOF || { echo "Error: Failed to create '$temp_properties_file'." >&2; return 2; }
 jdbc.default.driverClassName=com.mysql.cj.jdbc.Driver
 jdbc.default.url=jdbc:mysql://localhost:3306/${partition}?characterEncoding=UTF-8&dontTrackOpenResources=true&holdResultsOpenOverStatementClose}&serverTimezone=GMT&useFastDateParsing=false&useUnicode=true}
@@ -1640,7 +1671,7 @@ jdbc.default.password=
 liferay.home=${LIFERAY_DIR}
 database.partition.enabled=true
 upgrade.database.dl.storage.check.disabled=true
-#upgrade.database.preupgrade.verify.enabled=true
+upgrade.database.preupgrade.verify.enabled=true
 upgrade.database.preupgrade.data.cleanup.enabled=true
 EOF
           chmod 644 "$temp_properties_file" || { echo "Error: chmod on '$temp_properties_file'." >&2; return 644; }
